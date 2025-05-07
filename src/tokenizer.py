@@ -33,12 +33,7 @@ class TokenizerChar:
         vocab = list(self.token_to_idx.keys())
         indicies = list(self.token_to_idx.values())
 
-        default_value = -1
-
-        self.table_tokenize = tf.lookup.StaticHashTable(initializer=tf.lookup.KeyValueTensorInitializer(vocab, indicies), 
-                                                        default_value=default_value)
-        self.table_detokenize = tf.lookup.StaticHashTable(initializer=tf.lookup.KeyValueTensorInitializer(indicies, vocab), 
-                                                          default_value="")
+        self.create_hash()
 
     
     def tokenize(self, text):
@@ -54,17 +49,40 @@ class TokenizerChar:
         text = self.table_detokenize.lookup(indices)
         text = tf.strings.reduce_join(text, axis=-1, separator="")
         return text
+    
+    def create_hash(self):
+        vocab = list(self.token_to_idx.keys())
+        indicies = list(self.token_to_idx.values())
 
+        self.table_tokenize = tf.lookup.StaticHashTable(initializer=tf.lookup.KeyValueTensorInitializer(vocab, indicies), 
+                                                        default_value=-1)
+        self.table_detokenize = tf.lookup.StaticHashTable(initializer=tf.lookup.KeyValueTensorInitializer(indicies, vocab), 
+                                                          default_value="")
+        
+    def destroy_hash(self):
+        self.table_tokenize = None
+        self.table_detokenize = None
 
+from collections import Counter
+import itertools
 
 def pair_freq(word_list):
-    """Return a dict mapping pairs of words to their counts."""
-    pairs = {}
-    for word in word_list:
-        for i in range(len(word) - 1):
-            pair = (word[i], word[i + 1])
-            pairs[pair] = pairs.get(pair, 0) + 1
-    return pairs
+    # Flatten all adjacent pairs at once
+    all_pairs = itertools.chain.from_iterable(
+        zip(word, word[1:]) for word in word_list
+    )
+    return Counter(all_pairs)
+
+
+#def pair_freq(word_list):
+#    """Return a dict mapping pairs of words to their counts."""
+#    pairs = {}
+#    for word in word_list:
+#        for i in range(len(word) - 1):
+#            pair = (word[i], word[i + 1])
+#            pairs[pair] = pairs.get(pair, 0) + 1
+#    return pairs
+
 
 class TokenizerBPE:
     def __init__(self, corpus, num_merges):
@@ -83,9 +101,8 @@ class TokenizerBPE:
         vocab = list(self.token_to_idx.keys())
         indicies = list(self.token_to_idx.values())
 
-        self.table_detokenize = tf.lookup.StaticHashTable(initializer=tf.lookup.KeyValueTensorInitializer(indicies, vocab), 
-                                                          default_value="")
-
+        self.create_hash()
+        self.word_list = None
 
 
     def tokenize(self, text):
@@ -122,3 +139,15 @@ class TokenizerBPE:
                 if pair == key_max:
                     word[i] = new_token
                     word.pop(i + 1)
+
+    def create_hash(self):
+        vocab = list(self.token_to_idx.keys())
+        indicies = list(self.token_to_idx.values())
+
+        self.tokenizer.create_hash()
+        self.table_detokenize = tf.lookup.StaticHashTable(initializer=tf.lookup.KeyValueTensorInitializer(indicies, vocab), 
+                                                          default_value="")
+        
+    def destroy_hash(self):
+        self.tokenizer.destroy_hash()
+        self.table_detokenize = None
