@@ -176,7 +176,7 @@ class Transformer(tf.keras.Model):
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
 
-    def __call__(self, x):
+    def call(self, x):
 
         x_embeds = self.embed(x)
         for block in self.tf_blocks:
