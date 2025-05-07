@@ -186,5 +186,6 @@ pyrightconfig.json
 
 # Directories 
 corpus/
+model/
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks
