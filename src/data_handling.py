@@ -50,7 +50,7 @@ def sample_batch(contents,
         idx = np.random.randint(0, samples)
         text = contents[idx]
         length = text.shape[1]
-        if length < max_seq_len:
+        if length <= max_seq_len:
             continue
         else:
             start = np.random.randint(0, length - max_seq_len)

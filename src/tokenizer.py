@@ -151,3 +151,15 @@ class TokenizerBPE:
     def destroy_hash(self):
         self.tokenizer.destroy_hash()
         self.table_detokenize = None
+
+    
+
+    def tokenize(indices, merge_list):
+        indices = np.array(indices)
+        for pair, new_idx in merge_list:
+            slice = np.where(np.logical_and(indices[:-1] == pair[0],  indices[1:] == pair[1]))
+            if len(slice[0]) > 0:
+                indices[:-1][slice] = new_idx
+                indices = np.delete(indices, (slice[0]+1))
+
+        return tf.expand_dims(tf.convert_to_tensor(indices, dtype=tf.int32), axis=0)

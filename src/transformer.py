@@ -116,8 +116,6 @@ class TransformerBlock(tf.keras.Model):
 
 
 
-
-
 class Transformer(tf.keras.Model):
     def __init__(
         self,
@@ -213,11 +211,12 @@ class Transformer(tf.keras.Model):
 
         grads = tape.gradient(loss, self.parameter_list)
         self.optimizer.apply_gradients(zip(grads, self.parameter_list))
+
         return loss
 
     def evaluate(self, indices, y_true):
         y_true = y_true[:, 1:]
-        # categorical from index, not onehot encoding
+        
         y_pred = self.call(indices)[:, :-1]
         loss = tf.math.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred, from_logits=True))
         return loss
