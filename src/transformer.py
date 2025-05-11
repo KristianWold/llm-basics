@@ -37,15 +37,8 @@ class TransformerBlock(tf.keras.Model):
 
         d = tf.sqrt(tf.cast(self.head_dim, tf.float32))
 
-        self.WK = tf.Variable(
-            tf.random.uniform([heads, self.head_dim, embed_dim], -1 / d, 1 / d), name="WK"
-        )
-        self.WQ = tf.Variable(
-            tf.random.uniform([heads, self.head_dim, embed_dim], -1 / d, 1 / d), name="WQ"
-        )
-        self.WV = tf.Variable(
-            tf.random.uniform([heads, self.head_dim, embed_dim], -1 / d, 1 / d),
-            name="WV",
+        self.KQV = tf.Variable(
+            tf.random.uniform([embed_dim, 3*embed_dim], -1 / d, 1 / d), name="KQV"
         )
         self.WO = tf.Variable(
             tf.random.uniform([embed_dim, embed_dim], -1 / d, 1 / d), name="WO"
@@ -61,9 +54,7 @@ class TransformerBlock(tf.keras.Model):
         self.ln2.build((None, None, embed_dim))
 
         self.parameter_list = [
-            self.WK,
-            self.WQ,
-            self.WV,
+            self.KQV,
             self.WO,
         ]
         self.parameter_list += self.layer_up.parameter_list
@@ -71,17 +62,27 @@ class TransformerBlock(tf.keras.Model):
         self.parameter_list += self.ln1.trainable_variables
         self.parameter_list += self.ln2.trainable_variables
 
+        self.parameter_decay = [
+            self.KQV,
+            self.WO,
+            self.layer_up.W,
+            self.layer_down.W,
+        ]
+
     def attention(self, x_embeds):
         batch = tf.shape(x_embeds)[0]
         seq = tf.shape(x_embeds)[1]
 
-        x_k = tf.einsum("ikl, bjl -> bijk", self.WK, x_embeds)
-        x_q = tf.einsum("ikl, bjl -> bijk", self.WQ, x_embeds)
-        x_v = tf.einsum("ikl, bjl -> bijk", self.WV, x_embeds)
+        x_kqv = tf.matmul(x_embeds, self.KQV)
+        x_kqv = tf.reshape(x_kqv, [batch, seq, self.heads, 3, self.head_dim])
+        x_kqv = tf.transpose(x_kqv, [0, 2, 3, 1, 4])
+        x_k = x_kqv[:, :, 0, :, :]
+        x_q = x_kqv[:, :, 1, :, :]
+        x_v = x_kqv[:, :, 2, :, :]
 
-        inner = tf.einsum("bijl,bikl -> bijk", x_q, x_k)
-        mask = tf.linalg.band_part(tf.ones((1, seq, seq), dtype=tf.bool), -1, 0)
-        mask = tf.repeat(mask, self.heads, axis=0)
+
+        inner = tf.einsum("bijl, bikl -> bijk", x_q, x_k)
+        mask = tf.linalg.band_part(tf.ones((1, 1, seq, seq), dtype=tf.bool), -1, 0)
 
         inner_masked = tf.where(mask, inner, tf.constant(-np.inf))
 
@@ -127,6 +128,7 @@ class Transformer(tf.keras.Model):
         ff_dim,
         unembed_dims,
         lr,
+        wd=None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -137,6 +139,7 @@ class Transformer(tf.keras.Model):
         self.tf_blocks = tf_blocks
         self.ff_dim = ff_dim
         self.unembed_dims = unembed_dims
+        self.wd = wd
 
         self.head_dim = embed_dim // heads
 
@@ -144,10 +147,10 @@ class Transformer(tf.keras.Model):
         d = tf.sqrt(tf.cast(self.embed_dim, tf.float32))
 
         self.word_embed = tf.Variable(
-            tf.random.uniform([vocab_size, embed_dim], -1 / d, 1 / d), name="word_embed"
+            tf.random.uniform([vocab_size, embed_dim], -1 / d, 1 / d), name="W_embed"
         )
         self.pos_embed = tf.Variable(
-            tf.random.uniform([max_seq_len, embed_dim], -1 / d, 1 / d), name="pos_embed"
+            tf.random.uniform([max_seq_len, embed_dim], -1 / d, 1 / d), name="W_pos_embed"
         )
 
         self.tf_blocks = []
@@ -155,13 +158,7 @@ class Transformer(tf.keras.Model):
             self.tf_blocks.append(TransformerBlock(vocab_size, max_seq_len, heads, embed_dim, ff_dim))
     
 
-        self.unembed_dims.insert(0, embed_dim)
-        self.unembed_dims.append(vocab_size)
-        self.unembed_layers = []
-        for i in range(len(unembed_dims) - 1):
-            self.unembed_layers.append(DenseLayer(unembed_dims[i], unembed_dims[i + 1]))
-
-
+        self.unembed_b = tf.Variable(tf.zeros([vocab_size]))
         self.parameter_list = [
             self.word_embed,
             self.pos_embed,
@@ -169,21 +166,29 @@ class Transformer(tf.keras.Model):
 
         for block in self.tf_blocks:
             self.parameter_list += block.parameter_list
-        for layer in self.unembed_layers:
-            self.parameter_list += layer.parameter_list
+        
+        self.parameter_list.append(self.unembed_b)
+
+        self.parameter_decay = [
+            self.word_embed,
+            self.pos_embed,]
+        
+        for block in self.tf_blocks:
+            self.parameter_decay += block.parameter_decay
 
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
 
-    def call(self, x):
+    def call(self, x, logits=True):
 
-        x_embeds = self.embed(x)
+        x = self.embed(x)
         for block in self.tf_blocks:
-            x_embeds = block.call(x_embeds)
+            x = block.call(x)
         
-        y_pred = self.unembed(x_embeds)
+        if logits:
+            x = self.unembed(x)
 
-        return y_pred
-
+        return x
+    
     def embed(self, x):
         seq = tf.shape(x)[1]
         if seq > self.max_seq_len:
@@ -195,11 +200,7 @@ class Transformer(tf.keras.Model):
         return x_embeds
 
     def unembed(self, x_embeds):
-        for layer in self.unembed_layers[:-1]:
-            x_embeds = layer(x_embeds)
-            x_embeds = tf.nn.relu(x_embeds)
-
-        logits = self.unembed_layers[-1](x_embeds)
+        logits = x_embeds @ tf.transpose(self.word_embed) + self.unembed_b
 
         return logits
 
@@ -212,6 +213,12 @@ class Transformer(tf.keras.Model):
         grads = tape.gradient(loss, self.parameter_list)
         self.optimizer.apply_gradients(zip(grads, self.parameter_list))
 
+        get_lr = self.optimizer._decayed_lr(tf.float32)
+        
+        if self.wd is not None:
+            for param in self.parameter_decay:
+                param.assign_sub(get_lr*self.wd * param)
+                
         return loss
 
     def evaluate(self, indices, y_true):
@@ -220,4 +227,3 @@ class Transformer(tf.keras.Model):
         y_pred = self.call(indices)[:, :-1]
         loss = tf.math.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(y_true, y_pred, from_logits=True))
         return loss
-

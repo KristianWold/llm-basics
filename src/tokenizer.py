@@ -1,6 +1,7 @@
 import tensorflow as tf
 import numpy as np
 import unicodedata
+import re
 from tqdm.notebook import tqdm
 
 def normalize_to_ascii(s: str) -> str:
@@ -63,82 +64,90 @@ class TokenizerChar:
         self.table_tokenize = None
         self.table_detokenize = None
 
-from collections import Counter
-import itertools
+def pair_freq(indices, stop_token, vocab_size):
+    indices = np.array(indices)
+    mask = (indices[:-1] == stop_token) + (indices[1:] == stop_token)
 
-def pair_freq(word_list):
-    # Flatten all adjacent pairs at once
-    all_pairs = itertools.chain.from_iterable(
-        zip(word, word[1:]) for word in word_list
-    )
-    return Counter(all_pairs)
+    indices_large = indices[:-1] + indices[1:]*vocab_size
 
+    indices_large = indices_large[~mask]
+    temp = np.argmax(np.bincount(indices_large))
+    idx1 = temp % vocab_size
+    idx2 = temp // vocab_size
 
-#def pair_freq(word_list):
-#    """Return a dict mapping pairs of words to their counts."""
-#    pairs = {}
-#    for word in word_list:
-#        for i in range(len(word) - 1):
-#            pair = (word[i], word[i + 1])
-#            pairs[pair] = pairs.get(pair, 0) + 1
-#    return pairs
+    return (idx1, idx2)
 
 
 class TokenizerBPE:
-    def __init__(self, corpus, num_merges):
+    def __init__(self, corpus, num_merges, lowercase=False):
+        if lowercase:
+            print("Lowercasing corpus")
+            corpus = [line.lower() for line in tqdm(corpus)]
         self.tokenizer = TokenizerChar(corpus)
         self.token_to_idx = self.tokenizer.token_to_idx
+        self.idx_to_token = {v: k for k, v in self.token_to_idx.items()}
+
         self.vocab_size = self.tokenizer.vocab_size
 
-        self.word_list = []
-        for line in corpus:
-            self.word_list.extend(word_split(line))
+        self.create_hash()
 
+        self.stop_token = np.array(self.tokenizer.tokenize(" "))[0]
+        
+        corpus_clean = [normalize_to_ascii(line) for line in corpus]
+        corpus_flatten = " ".join(corpus_clean)
+        
+        corpus_flatten = re.findall(r"[\w']+|[^\w\s]", corpus_flatten)
+        corpus_flatten = " ".join(corpus_flatten)
+        
+        corpus_indices = self.tokenizer.tokenize(corpus_flatten)
+
+        print("Merging tokens")
         self.merge_list = []
         for i in tqdm(range(num_merges)):
-            self.merge()
-
-        vocab = list(self.token_to_idx.keys())
-        indicies = list(self.token_to_idx.values())
+            corpus_indices = self.merge(corpus_indices)
 
         self.create_hash()
         self.word_list = None
 
 
     def tokenize(self, text):
-        indicies = np.array(self.tokenizer.tokenize(text))
+        text = text.lower()
+        indices = np.array(self.tokenizer.tokenize(text))
         for (idx1, idx2), new_idx in self.merge_list:
-            for i in reversed(range(len(indicies) - 1)):
-                pair = (indicies[i], indicies[i + 1])
-                if pair == (idx1, idx2):
-                    indicies[i] = new_idx
-                    indicies = np.delete(indicies, i + 1)
-        indicies = tf.convert_to_tensor(indicies, dtype=tf.int64)
-        return indicies
+            slice = np.where(np.logical_and(indices[:-1] == idx1,  indices[1:] == idx2))
+            if len(slice[0]) > 0:
+                indices[:-1][slice] = new_idx
+                indices = np.delete(indices, (slice[0]+1))
+
+        return tf.expand_dims(tf.convert_to_tensor(indices, dtype=tf.int32), axis=0)
 
     def detokenize(self, indices):
         text = self.table_detokenize.lookup(indices)
         text = tf.strings.reduce_join(text, axis=-1, separator="")
         return text
 
-    def merge(self):
-        pf = pair_freq(self.word_list)
-        key_max = max(pf, key=pf.get)
-        token1, token2 = key_max
-        new_token = token1 + token2
-        self.token_to_idx[new_token] = self.vocab_size
+    def merge(self, corpus_indices):
+        corpus_indices = np.array(corpus_indices)    
 
-        idx1, idx2 = self.token_to_idx[token1], self.token_to_idx[token2]
+        new_idx = self.vocab_size
+        idx1, idx2 = pair_freq(corpus_indices, self.stop_token, self.vocab_size)
         self.merge_list.append([(idx1, idx2), self.vocab_size])
 
+    
+        token1 = self.idx_to_token[idx1]
+        token2 = self.idx_to_token[idx2]
+        print(token1, token2)
+        new_token = token1 + token2
+        self.token_to_idx[new_token] = new_idx
+        self.idx_to_token[new_idx] = new_token
         self.vocab_size += 1
 
-        for word in self.word_list:
-            for i in reversed(range(len(word) - 1)):
-                pair = (word[i], word[i + 1])
-                if pair == key_max:
-                    word[i] = new_token
-                    word.pop(i + 1)
+        slice = np.where(np.logical_and(corpus_indices[:-1] == idx1, corpus_indices[1:] == idx2))
+        if len(slice[0]) > 0:
+            corpus_indices[:-1][slice] = new_idx
+            corpus_indices = np.delete(corpus_indices, (slice[0]+1))
+
+        return corpus_indices
 
     def create_hash(self):
         vocab = list(self.token_to_idx.keys())
@@ -151,15 +160,3 @@ class TokenizerBPE:
     def destroy_hash(self):
         self.tokenizer.destroy_hash()
         self.table_detokenize = None
-
-    
-
-    def tokenize(indices, merge_list):
-        indices = np.array(indices)
-        for pair, new_idx in merge_list:
-            slice = np.where(np.logical_and(indices[:-1] == pair[0],  indices[1:] == pair[1]))
-            if len(slice[0]) > 0:
-                indices[:-1][slice] = new_idx
-                indices = np.delete(indices, (slice[0]+1))
-
-        return tf.expand_dims(tf.convert_to_tensor(indices, dtype=tf.int32), axis=0)
