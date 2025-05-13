@@ -194,8 +194,9 @@ class Transformer(tf.keras.Model):
         for block in self.tf_blocks:
             self.parameter_decay += block.parameter_decay
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
-        self.opt = tf.keras.mixed_precision.LossScaleOptimizer(self.optimizer, dynamic=True)
+        self.opt = tf.keras.mixed_precision.LossScaleOptimizer(tf.keras.optimizers.Adam(learning_rate=lr), 
+                                                               dynamic=True)
+        
 
     def call(self, x, training=False, logits=True, ):
 
@@ -243,7 +244,7 @@ class Transformer(tf.keras.Model):
 
         self.opt.apply_gradients(zip(grads, self.parameter_list))
 
-        get_lr = self.optimizer._decayed_lr(tf.float32)
+        get_lr = self.opt.inner_optimizer._decayed_lr("float32")
         
         if self.wd is not None:
             for param in self.parameter_decay:
@@ -258,3 +259,20 @@ class Transformer(tf.keras.Model):
         logits32 = tf.cast(logits, tf.float32)
         loss = tf.math.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(y_true, logits32, from_logits=True))
         return loss
+    
+    def get_num_params(self):
+        total_params = 0
+        for var in self.parameter_decay:
+            shape = var.get_shape()
+            num_params = 1
+            for dim in shape:
+                num_params *= dim
+            total_params += num_params
+
+        return total_params
+
+    def get_weight_norm(self):
+        weight_norm = 0
+        for param in self.parameter_decay:
+            weight_norm += tf.reduce_sum(tf.abs(param))
+        return weight_norm.numpy()/self.get_num_params()

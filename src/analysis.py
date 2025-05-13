@@ -6,16 +6,17 @@ from sklearn.cluster import KMeans
 from tqdm.notebook import tqdm
 
 
-def cosine_similarity(embed_a, embed_b):
+def cosine_similarity(embed_a, embed_b, normalize=True):
     """
     Compute the cosine similarity between two vectors.
     """
+    if normalize:
+        embed_a = tf.nn.l2_normalize(embed_a, axis=1)
+        embed_b = tf.nn.l2_normalize(embed_b, axis=1)
     dot_product = embed_a@tf.transpose(embed_b)
-    
-    norm_a = tf.linalg.norm(embed_a, axis=1, keepdims=True)
-    norm_b = tf.linalg.norm(embed_b, axis=1, keepdims=True)
 
-    return dot_product / (norm_a * norm_b)
+
+    return dot_product
 
 
 def cluster(X, n_clusters):
