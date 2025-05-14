@@ -232,10 +232,10 @@ class Transformer(tf.keras.Model):
         return logits
 
     @tf.function()
-    def train_step(self, indices, y_true):
+    def train_step(self, tokens):
 
         with tf.GradientTape() as tape:
-            loss = self.evaluate(indices, y_true, training=True)
+            loss = self.evaluate(tokens, training=True)
             scaled_loss = self.opt.get_scaled_loss(loss)
 
         scaled_grads = tape.gradient(scaled_loss, self.parameter_list)
@@ -252,10 +252,10 @@ class Transformer(tf.keras.Model):
                 
         return loss
 
-    def evaluate(self, indices, y_true, training = False):
-        y_true = y_true[:, 1:]
+    def evaluate(self, tokens, training = False):
+        y_true = tokens[:, 1:]
         
-        logits = self.call(indices[:, :-1], training)
+        logits = self.call(tokens[:, :-1], training)
         logits32 = tf.cast(logits, tf.float32)
         loss = tf.math.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(y_true, logits32, from_logits=True))
         return loss

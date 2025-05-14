@@ -148,6 +148,15 @@ class TokenizerBPE:
             corpus_indices = np.delete(corpus_indices, (slice[0]+1))
 
         return corpus_indices
+    
+    def add_special_tokens(self, special_tokens):
+        for token in special_tokens:
+            if token not in self.token_to_idx:
+                self.token_to_idx[token] = self.vocab_size
+                self.idx_to_token[self.vocab_size] = token
+                self.vocab_size += 1
+
+        self.create_hash()
 
     def create_hash(self):
         vocab = list(self.token_to_idx.keys())
@@ -160,3 +169,21 @@ class TokenizerBPE:
     def destroy_hash(self):
         self.tokenizer.destroy_hash()
         self.table_detokenize = None
+
+
+def fuse_tokenized_corpus(corpus, tokenizer):
+    SOS = tokenizer.token_to_idx["<s>"]
+    EOS = tokenizer.token_to_idx["</s>"]
+    corpus_list = [SOS]
+    for line in tqdm(corpus):
+        corpus_list.append(line)
+        corpus_list.append(EOS)
+        corpus_list.append(SOS)
+
+    corpus = tf.concat(corpus_list[:-1], axis=0)
+    return corpus
+
+def chunk_corpus(corpus, chunk_size):
+    corpus = tf.data.Dataset.from_tensor_slices(corpus)
+    corpus = corpus.batch(chunk_size, drop_remainder=True)
+    return corpus
