@@ -71,11 +71,13 @@ def pair_freq(indices, stop_token, vocab_size):
     indices_large = indices[:-1] + indices[1:]*vocab_size
 
     indices_large = indices_large[~mask]
-    temp = np.argmax(np.bincount(indices_large))
+    counts = np.bincount(indices_large)
+    temp = np.argmax(counts)
+    count = counts[temp]
     idx1 = temp % vocab_size
     idx2 = temp // vocab_size
 
-    return (idx1, idx2)
+    return (idx1, idx2), count
 
 
 class TokenizerBPE:
@@ -86,6 +88,7 @@ class TokenizerBPE:
         self.tokenizer = TokenizerChar(corpus)
         self.token_to_idx = self.tokenizer.token_to_idx
         self.idx_to_token = {v: k for k, v in self.token_to_idx.items()}
+        self.token_freq = {}
 
         self.vocab_size = self.tokenizer.vocab_size
 
@@ -110,7 +113,7 @@ class TokenizerBPE:
         self.word_list = None
 
 
-    def tokenize(self, text):
+    def encode(self, text):
         text = text.lower()
         indices = np.array(self.tokenizer.tokenize(text))
         for (idx1, idx2), new_idx in self.merge_list:
@@ -121,7 +124,7 @@ class TokenizerBPE:
 
         return tf.expand_dims(tf.convert_to_tensor(indices, dtype=tf.int32), axis=0)
 
-    def detokenize(self, indices):
+    def decode(self, indices):
         text = self.table_detokenize.lookup(indices)
         text = tf.strings.reduce_join(text, axis=-1, separator="")
         return text
@@ -130,16 +133,17 @@ class TokenizerBPE:
         corpus_indices = np.array(corpus_indices)    
 
         new_idx = self.vocab_size
-        idx1, idx2 = pair_freq(corpus_indices, self.stop_token, self.vocab_size)
+        (idx1, idx2), counts = pair_freq(corpus_indices, self.stop_token, self.vocab_size)
         self.merge_list.append([(idx1, idx2), self.vocab_size])
 
     
         token1 = self.idx_to_token[idx1]
         token2 = self.idx_to_token[idx2]
-        print(token1, token2)
+        print(token1, token2, counts)
         new_token = token1 + token2
         self.token_to_idx[new_token] = new_idx
         self.idx_to_token[new_idx] = new_token
+        self.token_freq[new_token] = counts
         self.vocab_size += 1
 
         slice = np.where(np.logical_and(corpus_indices[:-1] == idx1, corpus_indices[1:] == idx2))

@@ -2,6 +2,68 @@ import tensorflow as tf
 import numpy as np
 
 
+def put_block_diag_mask(inner, tokens, start_token_id):
+
+    is_start = tf.cast(tf.equal(tokens, start_token_id), tf.int32)
+    segment_ids = tf.cumsum(is_start, axis=1)
+    seg_i = tf.expand_dims(segment_ids, 2)                          
+    seg_j = tf.expand_dims(segment_ids, 1)                         
+    mask   = tf.equal(seg_i, seg_j)
+    mask = tf.expand_dims(mask, 1)                                      # [B, 1, T, T]                             
+
+    return tf.where(mask, inner, tf.constant(-np.inf, inner.dtype))
+
+
+def resetting_positions(tokens, start_token_id):
+    """
+    tokens:          int32 Tensor of shape [batch, seq_len]
+    start_token_id:  scalar int32 — the ID of your “start” token
+    returns:
+      rel_pos:       int32 Tensor of shape [batch, seq_len],
+                     where rel_pos[b,i] counts up from 0 since
+                     the last start‐token (or the sequence start).
+    """
+    # 1) detect start tokens
+    is_start = tf.equal(tokens, start_token_id)                   # [B, T], bool
+
+    # 2) force a “start” at position 0 of each sequence
+    batch_size = tf.shape(tokens)[0]
+    is_start = tf.concat([
+        tf.ones([batch_size, 1], dtype=tf.bool),
+        is_start[:, 1:]
+    ], axis=1)                                                    # [B, T]
+
+    # 3) make a [0,1,2,…,T-1] index array for each batch
+    seq_len = tf.shape(tokens)[1]
+    positions = tf.range(seq_len, dtype=tf.int32)                # [T]
+    positions = tf.expand_dims(positions, 0)                      # [1, T]
+    positions = tf.tile(positions, [batch_size, 1])              # [B, T]
+
+    # 4) pick out the indices where resets happen (else 0)
+    start_pos = tf.where(is_start, positions, tf.zeros_like(positions))  # [B, T]
+
+    # 5) compute, for each token, the **latest** reset‐position seen so far.
+    #    We need a cumulative‐maximum along axis=1.
+    #    If you have TF 2.5+, you can do:
+    try:
+        last_start = tf.math.cummax(start_pos, axis=1)           # [B, T]
+    except AttributeError:
+        # fallback for older TF: use tf.scan over the time axis
+        #  - transpose to [T, B], scan produces [T, B], then transpose back
+        start_t = tf.transpose(start_pos, [1, 0])               # [T, B]
+        init = tf.zeros([batch_size], dtype=start_pos.dtype)   # [B]
+        cummax_t = tf.scan(
+            lambda prev, cur: tf.maximum(prev, cur),
+            elems=start_t,
+            initializer=init
+        )                                                       # [T, B]
+        last_start = tf.transpose(cummax_t, [1, 0])             # [B, T]
+
+    # 6) subtract to get “position since last reset”
+    rel_pos = positions - last_start                            # [B, T]
+    return rel_pos
+
+
 class DenseLayer(tf.keras.Model):
     def __init__(self, input_dim, output_dim, **kwargs):
         super().__init__(**kwargs)
@@ -26,6 +88,7 @@ class TransformerBlock(tf.keras.Model):
         embed_dim,
         ff_dim,
         dropout,
+        tokenizer,
         **kwargs
 
     ):
@@ -36,6 +99,7 @@ class TransformerBlock(tf.keras.Model):
         self.max_seq_len = max_seq_len
         self.ff_dim = ff_dim
         self.dropout = dropout
+        self.tokenizer = tokenizer
 
         self.head_dim = embed_dim // heads
         self.dol1 = tf.keras.layers.Dropout(dropout)
@@ -76,7 +140,15 @@ class TransformerBlock(tf.keras.Model):
             self.layer_down.W,
         ]
 
-    def attention(self, x_embeds, training=False):
+
+    def call(self, x_embeds, tokens, training=False):
+        x_embeds = self.attention(x_embeds, tokens, training)
+        x_embeds = self.ffnn(x_embeds, training)
+
+        return x_embeds
+
+
+    def attention(self, x_embeds, tokens, training=False):
         batch = tf.shape(x_embeds)[0]
         seq = tf.shape(x_embeds)[1]
 
@@ -95,6 +167,9 @@ class TransformerBlock(tf.keras.Model):
         mask = tf.linalg.band_part(tf.ones((1, 1, seq, seq), dtype=tf.bool), -1, 0)
 
         inner_masked = tf.where(mask, inner, tf.constant(-np.inf, x_embeds.dtype))
+
+        if "<s>" in self.tokenizer.token_to_idx:
+            inner_masked = put_block_diag_mask(inner_masked, tokens, self.tokenizer.token_to_idx["<s>"])
         
 
         dk = tf.sqrt(tf.cast(self.head_dim, x_embeds.dtype))
@@ -124,11 +199,7 @@ class TransformerBlock(tf.keras.Model):
 
         return out
     
-    def call(self, x_embeds, training=False):
-        x_embeds = self.attention(x_embeds, training)
-        x_embeds = self.ffnn(x_embeds, training)
-
-        return x_embeds
+   
 
 
 
@@ -142,6 +213,7 @@ class Transformer(tf.keras.Model):
         heads,
         ff_dim,
         unembed_dims,
+        tokenizer,
         lr,
         wd=None,
         dropout=0.1,
@@ -155,6 +227,7 @@ class Transformer(tf.keras.Model):
         self.tf_blocks = tf_blocks
         self.ff_dim = ff_dim
         self.unembed_dims = unembed_dims
+        self.tokenizer = tokenizer
         self.wd = wd
         self.dropout = dropout
 
@@ -173,7 +246,7 @@ class Transformer(tf.keras.Model):
 
         self.tf_blocks = []
         for i in range(tf_blocks):
-            self.tf_blocks.append(TransformerBlock(vocab_size, max_seq_len, heads, embed_dim, ff_dim, dropout))
+            self.tf_blocks.append(TransformerBlock(vocab_size, max_seq_len, heads, embed_dim, ff_dim, dropout, tokenizer))
     
 
         self.unembed_b = tf.Variable(tf.zeros([vocab_size]))
@@ -198,30 +271,35 @@ class Transformer(tf.keras.Model):
                                                                dynamic=True)
         
 
-    def call(self, x, training=False, logits=True, ):
+    def call(self, tokens, training=False, logits=True, ):
 
-        x = self.embed(x, training)
+        x, tokens = self.embed(tokens, training)
         if training:
             x = tf.cast(x, tf.float16)
             
         for block in self.tf_blocks:
-            x = block.call(x, training)
+            x = block.call(x, tokens, training)
         
         if logits:
             x = self.unembed(x)
 
         return x
     
-    def embed(self, x, training=False):
-        seq = tf.shape(x)[1]
+    def embed(self, tokens, training=False):
+        seq = tf.shape(tokens)[1]
         if seq > self.max_seq_len:
-            x = x[:, -self.max_seq_len :]
+            tokens = tokens[:, -self.max_seq_len :]
             seq = self.max_seq_len
-        x_embeds = tf.nn.embedding_lookup(self.word_embed, x)
-        x_embeds = x_embeds + tf.expand_dims(self.pos_embed[:seq], axis=0)
+        x_embeds = tf.nn.embedding_lookup(self.word_embed, tokens)
+
+        start_token = self.tokenizer.token_to_idx["<s>"]
+        pos_idx = resetting_positions(tokens, start_token)
+        pos_embed = tf.cast(tf.nn.embedding_lookup(self.pos_embed, pos_idx), x_embeds.dtype)
+
+        x_embeds = x_embeds + pos_embed
         x_embeds = self.dol(x_embeds, training)
 
-        return x_embeds
+        return x_embeds, tokens
 
     def unembed(self, x_embeds):
         w_embed = tf.cast(self.word_embed, x_embeds.dtype)
@@ -257,7 +335,15 @@ class Transformer(tf.keras.Model):
         
         logits = self.call(tokens[:, :-1], training)
         logits32 = tf.cast(logits, tf.float32)
-        loss = tf.math.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(y_true, logits32, from_logits=True))
+        loss = tf.keras.losses.sparse_categorical_crossentropy(y_true, logits32, from_logits=True)
+
+        if "<pad>" in self.tokenizer.token_to_idx:
+            mask = tf.cast(tf.not_equal(y_true, self.tokenizer.token_to_idx["<pad>"]), tf.float32)
+            loss = loss * mask
+            loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
+        else:
+            loss = tf.reduce_mean(loss)
+
         return loss
     
     def get_num_params(self):
@@ -276,3 +362,36 @@ class Transformer(tf.keras.Model):
         for param in self.parameter_decay:
             weight_norm += tf.reduce_sum(tf.abs(param))
         return weight_norm.numpy()/self.get_num_params()
+    
+
+class WarmUpThenDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self,
+                 initial_learning_rate: float,
+                 warmup_steps: int,
+                 decay_schedule_fn: tf.keras.optimizers.schedules.LearningRateSchedule):
+        """
+        initial_learning_rate: peak LR reached at end of warmup
+        warmup_steps:      # of steps to ramp from 0 → initial_learning_rate
+        decay_schedule_fn: a tf.keras schedule to apply *after* warmup
+        """
+        super().__init__()
+        self.initial_lr = initial_learning_rate
+        self.warmup_steps = warmup_steps
+        self.decay_schedule_fn = decay_schedule_fn
+
+    def __call__(self, step):
+        # Cast to float32 for safety in graph mode
+        step = tf.cast(step, tf.float32)
+        warmup_steps = tf.cast(self.warmup_steps, tf.float32)
+
+        # compute linear warmup: lr = initial_lr * (step / warmup_steps)
+        warmup_lr = self.initial_lr * (step / warmup_steps)
+
+        # after warmup_steps, switch to decay schedule (shift step count)
+        decay_step = step - warmup_steps
+        decay_lr = self.decay_schedule_fn(decay_step)
+
+        # if step < warmup_steps, pick warmup_lr, else decay_lr
+        return tf.cond(step < warmup_steps,
+                       lambda: warmup_lr,
+                       lambda: decay_lr)

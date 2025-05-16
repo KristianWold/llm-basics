@@ -62,5 +62,42 @@ def sample_batch(contents,
 
     return indicies_list, y_true
 
-import os
+
+def fused_qa(question_list, answer_list, tokenizer):
+    q = tf.convert_to_tensor([[tokenizer.token_to_idx["<q>"]]])
+    a = tf.convert_to_tensor([[tokenizer.token_to_idx["<a>"]]])
+    sos = tf.convert_to_tensor([[tokenizer.token_to_idx["<s>"]]])
+    eos = tf.convert_to_tensor([[tokenizer.token_to_idx["</s>"]]])
+
+    corpus_list = []
+    for question, answer in tqdm(list(zip(question_list, answer_list))):
+        q_tokens = tokenizer.decode(question)
+        a_tokens = tokenizer.decode(answer)
+        qa = tf.concat([sos, q, q_tokens, a, a_tokens, eos], axis=1)
+        corpus_list.append(qa)
+    
+    return corpus_list
+
+
+def split_on_value(tensor, delim):
+    # 1) Find delimiter indices
+    is_delim   = tf.equal(tensor, delim)
+    delim_idxs = tf.where(is_delim)[:, 0]      # shape [num_delims]
+    
+    # 2) Build start/end indices so that each segment starts at either 0 or a delimiter
+    n = tf.shape(tensor)[0]
+    starts = tf.concat([[0],         delim_idxs], axis=0)  # e.g. [0, 3, 6]
+    ends   = tf.concat([delim_idxs, [n]],       axis=0)  # e.g. [3, 6, 9]
+    
+    # 3) Compute each segment’s length (end − start)
+    lengths = ends - starts                         # e.g. [3, 3, 3]
+    
+    # 4) Split the original tensor (delimiters are still in it)
+    parts = tf.split(tensor, lengths)
+    
+    # 5) (optional) drop any empty segments (can happen if tensor starts/ends with delim)
+    parts = [p for p in parts if tf.shape(p)[0] > 0]
+    
+    return parts
+        
 
