@@ -270,12 +270,9 @@ class Transformer(tf.keras.Model):
         self.opt = tf.keras.mixed_precision.LossScaleOptimizer(tf.keras.optimizers.Adam(learning_rate=lr), 
                                                                dynamic=True)
         
-
     def call(self, tokens, training=False, logits=True, ):
 
         x, tokens = self.embed(tokens, training)
-        if training:
-            x = tf.cast(x, tf.float16)
             
         for block in self.tf_blocks:
             x = block.call(x, tokens, training)
@@ -291,6 +288,8 @@ class Transformer(tf.keras.Model):
             tokens = tokens[:, -self.max_seq_len :]
             seq = self.max_seq_len
         x_embeds = tf.nn.embedding_lookup(self.word_embed, tokens)
+        if training:
+            x_embeds = tf.cast(x_embeds, tf.float16)
 
         start_token = self.tokenizer.token_to_idx["<s>"]
         pos_idx = resetting_positions(tokens, start_token)
@@ -309,8 +308,9 @@ class Transformer(tf.keras.Model):
 
         return logits
 
-    @tf.function()
+    @tf.function(input_signature=[tf.TensorSpec([None, None], tf.int32)])
     def train_step(self, tokens):
+        print("🔄 Tracing train_step; token shape:", tokens.shape)
 
         with tf.GradientTape() as tape:
             loss = self.evaluate(tokens, training=True)
