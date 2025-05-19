@@ -104,6 +104,8 @@ class TokenizerBPE:
         
         corpus_indices = self.tokenizer.tokenize(corpus_flatten)
 
+        self.pre_merge_list = []
+
         print("Merging tokens")
         self.merge_list = []
         for i in tqdm(range(num_merges)):
@@ -114,9 +116,11 @@ class TokenizerBPE:
 
 
     def encode(self, text):
-        text = text.lower()
+        #text = text.lower()
         indices = np.array(self.tokenizer.tokenize(text))
-        for (idx1, idx2), new_idx in self.merge_list:
+        if len(self.pre_merge_list) > 0:
+            indices = self.pre_merge(indices)
+        for (idx1, idx2), new_idx in tqdm(self.merge_list):
             slice = np.where(np.logical_and(indices[:-1] == idx1,  indices[1:] == idx2))
             if len(slice[0]) > 0:
                 indices[:-1][slice] = new_idx
@@ -130,7 +134,10 @@ class TokenizerBPE:
         return text
 
     def merge(self, corpus_indices):
-        corpus_indices = np.array(corpus_indices)    
+        corpus_indices = np.array(corpus_indices)
+
+        if len(self.pre_merge_list) > 0:
+            corpus_indices = self.pre_merge(corpus_indices)    
 
         new_idx = self.vocab_size
         (idx1, idx2), counts = pair_freq(corpus_indices, self.stop_token, self.vocab_size)
@@ -156,11 +163,38 @@ class TokenizerBPE:
     def add_special_tokens(self, special_tokens):
         for token in special_tokens:
             if token not in self.token_to_idx:
+                token_indices = self.tokenizer.tokenize(token)
                 self.token_to_idx[token] = self.vocab_size
                 self.idx_to_token[self.vocab_size] = token
+                self.pre_merge_list.append([token_indices, self.vocab_size])
                 self.vocab_size += 1
 
+
         self.create_hash()
+    
+
+    def pre_merge(self, indices):
+        indices = np.array(indices)
+        for token, value in self.pre_merge_list:
+            length = len(token)
+            token = np.array(token).reshape(-1,1)
+            indices_list = []
+            for i in range(length):
+                indices_list.append(np.pad(indices, (length - i - 1, i), 'constant', constant_values=(0, 0)))
+            indices_list = np.array(indices_list)
+
+            locs = np.where(np.equal(indices_list, token).all(axis=0))[0] - length + 1
+            del_idx = []
+            for loc in list(reversed(locs)):
+                indices[loc] = value
+                del_idx.extend(list(range(loc + 1, loc + length)))
+
+            if len(del_idx) > 0:    
+                del_idx = np.array(del_idx)
+                indices = np.delete(indices, del_idx)
+
+        return indices
+
 
     def create_hash(self):
         vocab = list(self.token_to_idx.keys())

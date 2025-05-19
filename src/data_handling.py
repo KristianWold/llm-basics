@@ -71,8 +71,8 @@ def fused_qa(question_list, answer_list, tokenizer):
 
     corpus_list = []
     for question, answer in tqdm(list(zip(question_list, answer_list))):
-        q_tokens = tokenizer.decode(question)
-        a_tokens = tokenizer.decode(answer)
+        q_tokens = tokenizer.encode(question)
+        a_tokens = tokenizer.encode(answer)
         qa = tf.concat([sos, q, q_tokens, a, a_tokens, eos], axis=1)
         corpus_list.append(qa)
     

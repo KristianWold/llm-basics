@@ -158,12 +158,12 @@ class TransformerBlock(tf.keras.Model):
         x_kqv = tf.matmul(x_embeds, kqv)
         x_kqv = tf.reshape(x_kqv, [batch, seq, self.heads, 3, self.head_dim])
         x_kqv = tf.transpose(x_kqv, [0, 2, 3, 1, 4])
-        x_k = x_kqv[:, :, 0, :, :]
-        x_q = x_kqv[:, :, 1, :, :]
-        x_v = x_kqv[:, :, 2, :, :]
+        x_k = x_kqv[:, :, 0, :, :] # [batch, heads, seq, head_dim]
+        x_q = x_kqv[:, :, 1, :, :] # [batch, heads, seq, head_dim]
+        x_v = x_kqv[:, :, 2, :, :] # [batch, heads, seq, head_dim]
 
-
-        inner = tf.einsum("bijl, bikl -> bijk", x_q, x_k)
+        x_k = tf.transpose(x_k, [0, 1, 3, 2])  # [batch, seq, head_dim, heads]
+        inner = tf.matmul(x_q, x_k)
         mask = tf.linalg.band_part(tf.ones((1, 1, seq, seq), dtype=tf.bool), -1, 0)
 
         inner_masked = tf.where(mask, inner, tf.constant(-np.inf, x_embeds.dtype))
@@ -179,7 +179,7 @@ class TransformerBlock(tf.keras.Model):
         head_outs = WA @ x_v
         concat = tf.transpose(head_outs, [0, 2, 1, 3])  # [batch, seq, heads, head_dim]
         out = tf.reshape(concat, [batch, seq, self.embed_dim])
-        out = tf.einsum("ijk,kl -> ijl", out, wo)
+        out = tf.matmul(out, wo)
 
         # pre-norm to keep gradients alive
         out = self.dol2(out)
@@ -270,7 +270,7 @@ class Transformer(tf.keras.Model):
         self.opt = tf.keras.mixed_precision.LossScaleOptimizer(tf.keras.optimizers.Adam(learning_rate=lr), 
                                                                dynamic=True)
         
-    def call(self, tokens, training=False, logits=True, ):
+    def call(self, tokens, training=False, logits=True,):
 
         x, tokens = self.embed(tokens, training)
             
