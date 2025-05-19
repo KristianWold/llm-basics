@@ -31,9 +31,6 @@ class TokenizerChar:
         self.vocab_size = len(self.vocab)
         self.token_to_idx = {ch: i for i, ch in enumerate(self.vocab)}
 
-        vocab = list(self.token_to_idx.keys())
-        indicies = list(self.token_to_idx.values())
-
         self.create_hash()
 
     
@@ -85,18 +82,18 @@ class TokenizerBPE:
         if lowercase:
             print("Lowercasing corpus")
             corpus = [line.lower() for line in tqdm(corpus)]
-        self.tokenizer = TokenizerChar(corpus)
+
+        corpus_clean = [normalize_to_ascii(line) for line in corpus]  
+
+        self.tokenizer = TokenizerChar(corpus_clean)
         self.token_to_idx = self.tokenizer.token_to_idx
         self.idx_to_token = {v: k for k, v in self.token_to_idx.items()}
         self.token_freq = {}
 
         self.vocab_size = self.tokenizer.vocab_size
-
         self.create_hash()
 
         self.stop_token = np.array(self.tokenizer.tokenize(" "))[0]
-        
-        corpus_clean = [normalize_to_ascii(line) for line in corpus]
         corpus_flatten = " ".join(corpus_clean)
         
         corpus_flatten = re.findall(r"[\w']+|[^\w\s]", corpus_flatten)
