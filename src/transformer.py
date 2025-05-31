@@ -2,66 +2,6 @@ import tensorflow as tf
 import numpy as np
 
 
-def put_block_diag_mask(inner, tokens, start_token_id):
-
-    is_start = tf.cast(tf.equal(tokens, start_token_id), tf.int32)
-    segment_ids = tf.cumsum(is_start, axis=1)
-    seg_i = tf.expand_dims(segment_ids, 2)                          
-    seg_j = tf.expand_dims(segment_ids, 1)                         
-    mask   = tf.equal(seg_i, seg_j)
-    mask = tf.expand_dims(mask, 1)                                      # [B, 1, T, T]                             
-
-    return tf.where(mask, inner, tf.constant(-np.inf, inner.dtype))
-
-
-def resetting_positions(tokens, start_token_id):
-    """
-    tokens:          int32 Tensor of shape [batch, seq_len]
-    start_token_id:  scalar int32 — the ID of your “start” token
-    returns:
-      rel_pos:       int32 Tensor of shape [batch, seq_len],
-                     where rel_pos[b,i] counts up from 0 since
-                     the last start‐token (or the sequence start).
-    """
-    # 1) detect start tokens
-    is_start = tf.equal(tokens, start_token_id)                   # [B, T], bool
-
-    # 2) force a “start” at position 0 of each sequence
-    batch_size = tf.shape(tokens)[0]
-    is_start = tf.concat([
-        tf.ones([batch_size, 1], dtype=tf.bool),
-        is_start[:, 1:]
-    ], axis=1)                                                    # [B, T]
-
-    # 3) make a [0,1,2,…,T-1] index array for each batch
-    seq_len = tf.shape(tokens)[1]
-    positions = tf.range(seq_len, dtype=tf.int32)                # [T]
-    positions = tf.expand_dims(positions, 0)                      # [1, T]
-    positions = tf.tile(positions, [batch_size, 1])              # [B, T]
-
-    # 4) pick out the indices where resets happen (else 0)
-    start_pos = tf.where(is_start, positions, tf.zeros_like(positions))  # [B, T]
-
-    # 5) compute, for each token, the **latest** reset‐position seen so far.
-    #    We need a cumulative‐maximum along axis=1.
-    #    If you have TF 2.5+, you can do:
-    try:
-        last_start = tf.math.cummax(start_pos, axis=1)           # [B, T]
-    except AttributeError:
-        # fallback for older TF: use tf.scan over the time axis
-        #  - transpose to [T, B], scan produces [T, B], then transpose back
-        start_t = tf.transpose(start_pos, [1, 0])               # [T, B]
-        init = tf.zeros([batch_size], dtype=start_pos.dtype)   # [B]
-        cummax_t = tf.scan(
-            lambda prev, cur: tf.maximum(prev, cur),
-            elems=start_t,
-            initializer=init
-        )                                                       # [T, B]
-        last_start = tf.transpose(cummax_t, [1, 0])             # [B, T]
-
-    # 6) subtract to get “position since last reset”
-    rel_pos = positions - last_start                            # [B, T]
-    return rel_pos
 
 
 class DenseLayer(tf.keras.Model):
@@ -217,6 +157,7 @@ class Transformer(tf.keras.Model):
         lr,
         wd=None,
         dropout=0.1,
+        accum_steps = 0,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -230,6 +171,7 @@ class Transformer(tf.keras.Model):
         self.tokenizer = tokenizer
         self.wd = wd
         self.dropout = dropout
+        self.accum_steps = tf.constant(accum_steps, dtype=tf.int32)
 
         self.head_dim = embed_dim // heads
         self.dol = tf.keras.layers.Dropout(dropout)
@@ -260,6 +202,15 @@ class Transformer(tf.keras.Model):
         
         self.parameter_list.append(self.unembed_b)
 
+        # gradient accumulation
+
+        self.step_counter = tf.Variable(0, trainable=False)
+
+        self.accum_grads = []
+        for param in self.parameter_list:
+            self.accum_grads.append(tf.Variable(tf.zeros_like(param), trainable=False))
+
+        # decay weights
         self.parameter_decay = [
             self.word_embed,
             self.pos_embed,]
@@ -312,22 +263,41 @@ class Transformer(tf.keras.Model):
     def train_step(self, tokens):
         print("🔄 Tracing train_step; token shape:", tokens.shape)
 
+        get_lr = self.opt.inner_optimizer._decayed_lr("float32")
+
         with tf.GradientTape() as tape:
             loss = self.evaluate(tokens, training=True)
             scaled_loss = self.opt.get_scaled_loss(loss)
 
         scaled_grads = tape.gradient(scaled_loss, self.parameter_list)
         grads = self.opt.get_unscaled_gradients(scaled_grads)
-        grads, _ = tf.clip_by_global_norm(grads, 1.0)
-
-        self.opt.apply_gradients(zip(grads, self.parameter_list))
-
-        get_lr = self.opt.inner_optimizer._decayed_lr("float32")
         
-        if self.wd is not None:
-            for param in self.parameter_decay:
-                param.assign_sub(get_lr*self.wd * param)
+        if self.accum_steps > 0:
+            self.step_counter.assign_add(1)
+            self.accumulate_gradients(grads)
+
+            if tf.equal(self.step_counter, self.accum_steps):
+                self.step_counter.assign(0)
                 
+                grads = [accum_grad / tf.cast(self.accum_steps, tf.float32) for accum_grad in self.accum_grads]
+                grads, _ = tf.clip_by_global_norm(grads, 1.0)
+                
+                self.opt.apply_gradients(zip(grads, self.parameter_list))
+
+                if self.wd is not None:
+                    for param in self.parameter_decay:
+                        param.assign_sub(get_lr*self.wd * param)
+
+                for accum_grad in self.accum_grads:
+                    accum_grad.assign(tf.zeros_like(accum_grad))
+        else:
+            grads, _ = tf.clip_by_global_norm(grads, 1.0)
+            self.opt.apply_gradients(zip(grads, self.parameter_list))
+
+            if self.wd is not None:
+                for param in self.parameter_decay:
+                    param.assign_sub(get_lr*self.wd * param)
+        
         return loss
 
     def evaluate(self, tokens, training = False):
@@ -346,6 +316,10 @@ class Transformer(tf.keras.Model):
 
         return loss
     
+    def accumulate_gradients(self, grads):
+        for accum_grad, grad in zip(self.accum_grads, grads):
+            accum_grad.assign_add(grad)
+    
     def get_num_params(self):
         total_params = 0
         for var in self.parameter_decay:
@@ -363,6 +337,71 @@ class Transformer(tf.keras.Model):
             weight_norm += tf.reduce_sum(tf.abs(param))
         return weight_norm.numpy()/self.get_num_params()
     
+
+
+def put_block_diag_mask(inner, tokens, start_token_id):
+
+    is_start = tf.cast(tf.equal(tokens, start_token_id), tf.int32)
+    segment_ids = tf.cumsum(is_start, axis=1)
+    seg_i = tf.expand_dims(segment_ids, 2)                          
+    seg_j = tf.expand_dims(segment_ids, 1)                         
+    mask   = tf.equal(seg_i, seg_j)
+    mask = tf.expand_dims(mask, 1)                                      # [B, 1, T, T]                             
+
+    return tf.where(mask, inner, tf.constant(-np.inf, inner.dtype))
+
+
+def resetting_positions(tokens, start_token_id):
+    """
+    tokens:          int32 Tensor of shape [batch, seq_len]
+    start_token_id:  scalar int32 — the ID of your “start” token
+    returns:
+      rel_pos:       int32 Tensor of shape [batch, seq_len],
+                     where rel_pos[b,i] counts up from 0 since
+                     the last start‐token (or the sequence start).
+    """
+    # 1) detect start tokens
+    is_start = tf.equal(tokens, start_token_id)                   # [B, T], bool
+
+    # 2) force a “start” at position 0 of each sequence
+    batch_size = tf.shape(tokens)[0]
+    is_start = tf.concat([
+        tf.ones([batch_size, 1], dtype=tf.bool),
+        is_start[:, 1:]
+    ], axis=1)                                                    # [B, T]
+
+    # 3) make a [0,1,2,…,T-1] index array for each batch
+    seq_len = tf.shape(tokens)[1]
+    positions = tf.range(seq_len, dtype=tf.int32)                # [T]
+    positions = tf.expand_dims(positions, 0)                      # [1, T]
+    positions = tf.tile(positions, [batch_size, 1])              # [B, T]
+
+    # 4) pick out the indices where resets happen (else 0)
+    start_pos = tf.where(is_start, positions, tf.zeros_like(positions))  # [B, T]
+
+    # 5) compute, for each token, the **latest** reset‐position seen so far.
+    #    We need a cumulative‐maximum along axis=1.
+    #    If you have TF 2.5+, you can do:
+    try:
+        last_start = tf.math.cummax(start_pos, axis=1)           # [B, T]
+    except AttributeError:
+        # fallback for older TF: use tf.scan over the time axis
+        #  - transpose to [T, B], scan produces [T, B], then transpose back
+        start_t = tf.transpose(start_pos, [1, 0])               # [T, B]
+        init = tf.zeros([batch_size], dtype=start_pos.dtype)   # [B]
+        cummax_t = tf.scan(
+            lambda prev, cur: tf.maximum(prev, cur),
+            elems=start_t,
+            initializer=init
+        )                                                       # [T, B]
+        last_start = tf.transpose(cummax_t, [1, 0])             # [B, T]
+
+    # 6) subtract to get “position since last reset”
+    rel_pos = positions - last_start                            # [B, T]
+    return rel_pos
+
+
+
 
 class WarmUpThenDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self,
