@@ -85,12 +85,16 @@ class TokenizerBPE:
 
         corpus_flatten = " ".join(corpus_clean)
         corpus_flatten = re.findall(r"\s*[\w']+|[^\w]", corpus_flatten)
+<<<<<<< HEAD
         # shuffle and sample
         random.shuffle(corpus_flatten)
         length = len(corpus_flatten)
 
         corpus_flatten = corpus_flatten[:int(length * ratio)]
 
+=======
+        # shuffle and sample before merging
+>>>>>>> aef88b59a6a34beeebfdb2d5837ab3168a9e2f71
         corpus_flatten = "<sep>".join(corpus_flatten)
         
         corpus_tokens = self.tokenizer_char.encode(corpus_flatten)
