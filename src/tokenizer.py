@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 import unicodedata
 import re
+import random
 from tqdm.notebook import tqdm
 
 def normalize_to_ascii(s: str) -> str:
@@ -61,7 +62,7 @@ class TokenizerChar:
         self.table_detokenize = None
 
 class TokenizerBPE:
-    def __init__(self, corpus, num_merges, lowercase=False):
+    def __init__(self, corpus, num_merges, lowercase=False, ratio=1):
         if lowercase:
             print("Lowercasing corpus")
             corpus = [line.lower() for line in tqdm(corpus)]
@@ -84,7 +85,12 @@ class TokenizerBPE:
 
         corpus_flatten = " ".join(corpus_clean)
         corpus_flatten = re.findall(r"\s*[\w']+|[^\w]", corpus_flatten)
-        # shuffle and sample before merging
+        # shuffle and sample
+        random.shuffle(corpus_flatten)
+        length = len(corpus_flatten)
+
+        corpus_flatten = corpus_flatten[:int(length * ratio)]
+
         corpus_flatten = "<sep>".join(corpus_flatten)
         
         corpus_tokens = self.tokenizer_char.encode(corpus_flatten)
